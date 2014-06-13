@@ -14,6 +14,7 @@ import (
     "reflect"
     "crypto/tls"
     "net"
+    _ "io/ioutil"
     "net/http"
     "net/http/httputil"
     "strings"
@@ -31,7 +32,7 @@ type Command struct {
 }
 
 func (s *Command) Run(client *heroku.Client, app string) {
-    fmt.Println("Not implemented.")
+    log.Println("Not implemented.")
 }
 
 type Status struct {
@@ -39,9 +40,11 @@ type Status struct {
 }
 
 func (s *Status) Run(client *heroku.Client, app string) {
-        fmt.Println("=== Heroku Status")
-        fmt.Println("Development: No known issues at this time.")
-        fmt.Println("Production:  No known issues at this time.")
+        // https://status.heroku.com/api/v3/current-status.json
+
+        log.Println("=== Heroku Status")
+        log.Println("Development: No known issues at this time.")
+        log.Println("Production:  No known issues at this time.")
 }
 
 type Version struct {
@@ -49,7 +52,7 @@ type Version struct {
 }
 
 func (s *Version) Run(client *heroku.Client) {
-        fmt.Printf("go-heroku-toolbelt/%s (%s) go/%s\n", "0.001", runtime.GOOS, runtime.Version())
+        log.Printf("go-heroku-toolbelt/%s (%s) go/%s\n", "0.001", runtime.GOOS, runtime.Version())
 }
 
 type Log struct {
@@ -65,8 +68,8 @@ func (s *Log) Run(client *heroku.Client, app string ) {
 
 
         tail := true
-
-        options:=&heroku.LogSessionCreateOpts{Tail: &tail}
+        lines := 10
+        options:=&heroku.LogSessionCreateOpts{Tail: &tail, Lines: &lines}
 
         session, err := client.LogSessionCreate(app, options)
         if err!=nil {
@@ -75,11 +78,11 @@ func (s *Log) Run(client *heroku.Client, app string ) {
         }
 
         // X-Heroku-Warning
+        u, err := url.Parse(session.LogplexURL)
 
         c:=make(chan string)
 
-        go func() {
-            u, err := url.Parse(session.LogplexURL)
+        go func(u *url.URL, c chan string) {
 
             tcpConn, err := net.Dial("tcp", u.Host + ":443")
             cf := &tls.Config{}
@@ -88,20 +91,36 @@ func (s *Log) Run(client *heroku.Client, app string ) {
             reader := bufio.NewReader(ssl)
             hc := httputil.NewClientConn(ssl, reader)
 
-            req, err := http.NewRequest("GET", u.Path +"?" + u.RawQuery, nil)
+            req := &http.Request{
+                Method:     "GET",
+                URL:        u,
+                Proto:      "HTTP/1.1",
+                ProtoMajor: 1,
+                ProtoMinor: 1,
+                Header:     make(http.Header),
+                Body:       nil,
+                Host:       u.Host,
+            }
+
             req.Header.Add("Host", u.Host)
             req.Header.Add("X-Heroku-API-Version", `2`)
             req.Header.Add("User-Agent", fmt.Sprintf(`go-heroku/0.001 (%s go / %s)`, runtime.GOOS, runtime.Version()))
             req.Header.Add("X-Go-Version", runtime.Version())
             req.Header.Add("X-Go-Platform", runtime.GOOS)
 
-            _, err = hc.Do(req)
+            err = hc.Write(req)
 
             if err!=nil {
-                // log.Printf ("Error %s", err)
-                // return
+                log.Printf ("Error %s", err)
+                return
             }
-            
+
+            _, err = hc.Read(req) 
+
+            if err!=nil {
+            }
+
+
             for {
                 line, err := reader.ReadBytes('\r')
 
@@ -114,11 +133,11 @@ func (s *Log) Run(client *heroku.Client, app string ) {
 
                 c <- string(line)
             }
-        }()
+        }(u, c)
 
 
         for {
-            fmt.Println(<- c)
+            log.Println(<- c)
         }
 }
 
@@ -148,8 +167,6 @@ func createClient() (*heroku.Client, error) {
 
         scanner := bufio.NewScanner(file)
         for scanner.Scan() {
-            fmt.Println(scanner.Text())
-
             if strings.Split(scanner.Text(), " ")[0] == "machine" {
                 machine = strings.Split(scanner.Text(), " ")[1]
                 credentials[machine]=&Credential{}
@@ -170,8 +187,11 @@ func createClient() (*heroku.Client, error) {
         
         username:= credentials["api.heroku.com"].Username
         password:= credentials["api.heroku.com"].Password
-        // password := os.GetEnv("HEROKU_API_KEY")
-        
+
+        if os.Getenv("HEROKU_API_KEY") != "" {
+            password = os.Getenv("HEROKU_API_KEY")
+        }
+
         client := heroku.Client{Username: username, Password: password}
         return &client, nil
 }
